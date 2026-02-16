@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 use configparser::ini::Ini;
-use hound::{WavReader, WavSpec};
+use hound::WavReader;
 use rustfft::{FftPlanner, num_complex::Complex};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use svg::node::element::{Line, Rectangle, Text as SvgText};
@@ -18,25 +18,31 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Converts a MusicXML file into a Kora tab SVG.
+    /// Converts a MusicXML file into a Kora tab.
     Draw {
         /// Path to the input MusicXML file.
         source: PathBuf,
-        /// Path for the output SVG file.
+        /// Path for the output file.
         output: PathBuf,
         /// Name of the tuning to use from tuning.ini.
         #[arg(short, long)]
         tuning: String,
+        /// Output format.
+        #[arg(long, default_value = "svg")]
+        format: String,
     },
-    /// Transcribes a WAV audio file into a Kora tab SVG.
+    /// Transcribes a WAV audio file into a Kora tab.
     Transcribe {
         /// Path to the input WAV file.
         source: PathBuf,
-        /// Path for the output SVG file.
+        /// Path for the output file.
         output: PathBuf,
         /// Name of the tuning to use from tuning.ini.
         #[arg(short, long)]
         tuning: String,
+        /// Output format.
+        #[arg(long, default_value = "svg")]
+        format: String,
     },
 }
 
@@ -87,7 +93,7 @@ fn draw_kora_system(mut doc: Document, y_off: f64, m_num: i32, margin: f64, widt
     doc
 }
 
-fn draw_tab(
+fn draw_svg(
     output_path: &PathBuf,
     song_title: &str,
     tuning: &KoraTuning,
@@ -194,6 +200,91 @@ fn draw_tab(
 
     svg::save(output_path, &svg_doc)?;
     Ok(())
+}
+
+fn draw_ascii(
+    song_title: &str,
+    tuning: &KoraTuning,
+    notes: &[Note],
+) -> Result<String, Box<dyn std::error::Error>> {
+    const MAX_WIDTH: usize = 120;
+    const POS_WIDTH: usize = 6; // provides some spacing
+
+    let mut output = format!("Title: {}\nTuning: {}\n\n", song_title, tuning.name);
+    if notes.is_empty() {
+        return Ok(output);
+    }
+
+    let mut notes_by_pos: HashMap<i64, Vec<Note>> = HashMap::new();
+    for note in notes {
+        notes_by_pos.entry((note.position * 1000.0) as i64).or_default().push(note.clone());
+    }
+    let mut sorted_positions: Vec<_> = notes_by_pos.keys().cloned().collect();
+    sorted_positions.sort();
+    
+    let positions_per_system = MAX_WIDTH / POS_WIDTH;
+    let position_chunks: Vec<_> = sorted_positions.chunks(positions_per_system).collect();
+
+    for chunk in position_chunks {
+        let num_positions = chunk.len();
+        let system_width = num_positions * POS_WIDTH;
+        
+        // 1. Create canvas with background and vertical lines
+        let mut canvas: Vec<Vec<char>> = vec![vec!['-'; system_width]; 11];
+        for row in 0..11 {
+            for pos_idx in 0..num_positions {
+                // Center the bar in each position
+                canvas[row][pos_idx * POS_WIDTH + (POS_WIDTH / 2)] = '|';
+            }
+        }
+
+        // 2. Overwrite with notes
+        for (pos_idx, pos_key) in chunk.iter().enumerate() {
+            let chord = notes_by_pos.get(pos_key).unwrap();
+            
+            for note in chord {
+                if let Some((idx, is_right)) = tuning.left.iter().position(|&p| p == note.midi).map(|i| (i, false))
+                    .or_else(|| tuning.right.iter().position(|&p| p == note.midi).map(|i| (i, true))) {
+                    
+                    let line_idx = 10 - idx;
+                    let label = (idx + 1).to_string();
+                    let label_chars: Vec<char> = label.chars().collect();
+                    
+                    let col_offset = pos_idx * POS_WIDTH;
+                    let bar_col_in_pos = POS_WIDTH / 2;
+                    let bar_col_abs = col_offset + bar_col_in_pos;
+
+                    if is_right {
+                        // Place label to the right of the bar, e.g., "...|12.."
+                        let start_col = bar_col_abs + 1;
+                        for (i, c) in label_chars.iter().enumerate() {
+                            if start_col + i < col_offset + POS_WIDTH {
+                                canvas[line_idx][start_col + i] = *c;
+                            }
+                        }
+                    } else {
+                        // Place label to the left of the bar, e.g., "..12|..."
+                        let start_col = bar_col_abs - label_chars.len();
+                        for (i, c) in label_chars.iter().enumerate() {
+                            if start_col + i < bar_col_abs {
+                                canvas[line_idx][start_col + i] = *c;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add the system to the output.
+        for line_chars in canvas {
+            output.push_str(&line_chars.iter().collect::<String>());
+            output.push('\n');
+        }
+        output.push('\n');
+        output.push('\n');
+    }
+
+    Ok(output)
 }
 
 
@@ -329,9 +420,9 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     
-    let (source, output, tuning_name, is_audio) = match args.command {
-        Commands::Draw { source, output, tuning } => (source, output, tuning, false),
-        Commands::Transcribe { source, output, tuning } => (source, output, tuning, true),
+    let (source, output, tuning_name, format, is_audio) = match args.command {
+        Commands::Draw { source, output, tuning, format } => (source, output, tuning, format, false),
+        Commands::Transcribe { source, output, tuning, format } => (source, output, tuning, format, true),
     };
 
     let mut config = Ini::new();
@@ -349,7 +440,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         parse_musicxml(&source)?
     };
     
-    draw_tab(&output, &song_title, &tuning, &notes)?;
+    match format.as_str() {
+        "ascii" => {
+            let ascii_output = draw_ascii(&song_title, &tuning, &notes)?;
+            fs::write(&output, ascii_output)?;
+        },
+        "svg" => {
+            draw_svg(&output, &song_title, &tuning, &notes)?;
+        },
+        _ => return Err(format!("Unsupported format: {}", format).into()),
+    }
     
     println!("Success! Tab for '{}' generated at '{}'.", song_title, output.display());
     Ok(())
