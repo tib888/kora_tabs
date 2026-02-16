@@ -1,0 +1,23 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "cppvsdbg",
+            "request": "launch",
+            "name": "Debug with MSVC",
+            "program": "${workspaceFolder}/target/debug/koratabs.exe",
+            "args": [
+                "transcribe",
+                "tunga.wav",
+                "my_tab.svg",
+                "--tuning",
+                "Silaba"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "console": "externalTerminal",
+            
+        }
+    ]
+}
