@@ -4,6 +4,7 @@ use hound::WavReader;
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::ops::Add;
 use std::path::PathBuf;
 use svg::node::element::{Line, Rectangle, Text as SvgText};
 use svg::Document;
@@ -46,33 +47,76 @@ enum Commands {
     },
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+struct Pitch(i32);   // MIDI note number * 100
+
+impl Add for Pitch {
+    type Output = Pitch;
+    fn add(self, other: Pitch) -> Pitch {
+        Pitch(self.0 + other.0)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Note {
-    midi: u8,
+    pitch: Pitch,
     position: f64, // General-purpose position, time in seconds for audio, or beat count for XML
 }
 
 struct KoraTuning {
     name: String,
-    left: Vec<u8>,
-    right: Vec<u8>,
+    left: Vec<Pitch>,
+    right: Vec<Pitch>,
 }
 
-fn note_to_midi(note: &str) -> u8 {
+/// returns midi number * 100 + microtone adjustments in cents
+/// for example "A4+30" gives 1200 * 5 + 900 + 30 = 6930
+fn note_to_pitch(note: &str) -> Option<Pitch> {
     let note = note.trim();
-    if note.is_empty() { return 0; }
-    let (name, octave_str) = if note.len() >= 2 && (&note[1..2] == "b" || &note[1..2] == "#") {
-        (&note[0..2], &note[2..])
+    if note.is_empty() { return None; }
+
+    let mut main_part = note;
+    let mut cents: i32 = 0;
+
+    if let Some(plus_idx) = note.rfind('+') {
+        if let Some(val_str) = note.get(plus_idx + 1..) {
+            if !val_str.is_empty() && val_str.chars().all(char::is_numeric) {
+                main_part = &note[..plus_idx];
+                cents = val_str.parse().unwrap_or(0);
+            }
+        }
+    } else if let Some(minus_idx) = note.rfind('-') {
+        if let Some(val_str) = note.get(minus_idx + 1..) {
+            if !val_str.is_empty() && val_str.chars().all(char::is_numeric) {
+                main_part = &note[..minus_idx];
+                cents = -val_str.parse().unwrap_or(0);
+            }
+        }
+    }
+
+    let (name, octave_str) = if note.len() >= 2 && (&main_part[1..2] == "b" || &main_part[1..2] == "#") {
+        (&main_part[0..2], &main_part[2..])
     } else {
-        (&note[0..1], &note[1..])
+        (&main_part[0..1], &main_part[1..])
     };
-    let base = match name {
-        "C" => 0, "C#" | "Db" => 1, "D" => 2, "D#" | "Eb" => 3, "E" => 4,
-        "F" => 5, "F#" | "Gb" => 6, "G" => 7, "G#" | "Ab" => 8, "A" => 9, "A#" | "Bb" => 10, "B" => 11,
-        _ => 0,
+    let base: Option<i32> = match name {
+        "C" => Some(0), 
+        "C#" | "Db" => Some(1), 
+        "D" => Some(2), 
+        "D#" | "Eb" => Some(3), 
+        "E" => Some(4),
+        "F" => Some(5), 
+        "F#" | "Gb" => Some(6), 
+        "G" => Some(7), 
+        "G#" | "Ab" => Some(8), 
+        "A" => Some(9), 
+        "A#" | "Bb" => Some(10), 
+        "B" => Some(11),
+        _ => None,
     };
-    let octave: i8 = octave_str.parse().unwrap_or(4);
-    ((octave + 1) * 12 + base) as u8
+    let octave: i32 = octave_str.parse().unwrap_or(4);
+    
+    base.map(|base| Pitch((octave + 1) * 1200 + 100 * base + cents))
 }
 
 fn draw_kora_system(mut doc: Document, y_off: f64, m_num: i32, margin: f64, width: f64) -> Document {
@@ -168,8 +212,8 @@ fn draw_svg(
                 .set("stroke-width", 1));
         }
         
-        if let Some((idx, is_right)) = tuning.left.iter().position(|&p| p == note.midi).map(|i| (i, false))
-            .or_else(|| tuning.right.iter().position(|&p| p == note.midi).map(|i| (i, true))) {
+        if let Some((idx, is_right)) = tuning.left.iter().position(|&p| p == note.pitch).map(|i| (i, false))
+            .or_else(|| tuning.right.iter().position(|&p| p == note.pitch).map(|i| (i, true))) {
             
             let color = if is_right { "#FF0000" } else { "#0000FF" }; // Red (Right), Blue (Left)
             let label = format!("{}", idx + 1);
@@ -243,8 +287,8 @@ fn draw_ascii(
             let chord = notes_by_pos.get(pos_key).unwrap();
             
             for note in chord {
-                if let Some((idx, is_right)) = tuning.left.iter().position(|&p| p == note.midi).map(|i| (i, false))
-                    .or_else(|| tuning.right.iter().position(|&p| p == note.midi).map(|i| (i, true))) {
+                if let Some((idx, is_right)) = tuning.left.iter().position(|&p| p == note.pitch).map(|i| (i, false))
+                    .or_else(|| tuning.right.iter().position(|&p| p == note.pitch).map(|i| (i, true))) {
                     
                     let line_idx = 10 - idx;
                     let label = (idx + 1).to_string();
@@ -313,28 +357,25 @@ fn parse_musicxml(source: &PathBuf) -> Result<(String, Vec<Note>), Box<dyn std::
                 let step = pitch_node.children().find(|n| n.has_tag_name("step")).unwrap().text().unwrap();
                 let octave = pitch_node.children().find(|n| n.has_tag_name("octave")).unwrap().text().unwrap();
                 let alter = pitch_node.children().find(|n| n.has_tag_name("alter")).map(|n| n.text().unwrap()).unwrap_or("0");
-                let midi = (note_to_midi(&format!("{}{}", step, octave)) as i16 + alter.parse::<i16>().unwrap()) as u8;
-                notes.push(Note { midi, position: current_pos });
+                let pitch = note_to_pitch(&format!("{}{}", step, octave)).unwrap() + alter.parse::<i32>().map(|a| Pitch(a * 100)).unwrap();
+                notes.push(Note { pitch, position: current_pos });
             }
         }
     }
     Ok((song_title, notes))
 }
 
-fn freq_to_midi(freq: f32) -> f32 {
-    69.0 + 12.0 * (freq / 440.0).log2()
+fn freq_to_pitch(freq: f32) -> Pitch {
+    Pitch(6900 + (1200.0 * (freq / 440.0).log2()).round() as i32)
 }
 
-fn find_closest_note_in_tuning(midi: u8, tuning: &KoraTuning) -> Option<u8> {
+fn find_closest_note_in_tuning(pitch: Pitch, tuning: &KoraTuning) -> Option<Pitch> {
     let all_notes = tuning.left.iter().chain(tuning.right.iter());
 
     // Find the note in the tuning with the minimum distance to the detected midi note.
-    if let Some(closest_note) = all_notes.min_by_key(|&note_midi| (midi as i16 - *note_midi as i16).abs()) {
-        // Calculate the distance in semitones (MIDI numbers are semitones).
-        let distance = (midi as i16 - *closest_note as i16).abs();
-
-        // 200 cents is 2 semitones. Only snap if the distance is within this threshold.
-        if distance <= 2 {
+    if let Some(closest_note) = all_notes.min_by_key(|&note| (pitch.0 - note.0).abs()) {
+        // Only snap if the distance is within 200 cents threshold.
+        if (pitch.0 - closest_note.0).abs() <= 200 {
             return Some(*closest_note);
         }
     }
@@ -344,11 +385,11 @@ fn find_closest_note_in_tuning(midi: u8, tuning: &KoraTuning) -> Option<u8> {
 }
 
 fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Vec<Note>), Box<dyn std::error::Error>> {
-    const WINDOW_SIZE: usize = 4096;
-    const HOP_SIZE: usize = 1024;
-    const POWER_THRESHOLD: f32 = 10.0;
+    const WINDOW_SIZE: usize = 4096;//todo: calculate the required freq resolution based on the freq difference of the lowest nodes => use that and the sampling frequency to calculate the needed FFT window size and round up to 2^n! 
+    const HOP_SIZE: usize = 1024;//todo: calculate this to be less than 1/32 second (use sampling frequency!)
+    const POWER_THRESHOLD: f32 = 10.0;//this must be different in case of log scales - best would be to make it adaptive!
     const NOTE_STABILITY_THRESHOLD: usize = 3;
-    const MAX_NOTES: usize = 4;
+    const MAX_NOTES: usize = 4;//todo: this should be the max number of new nodes at an instant (older nodes may still ring...)
 
     let mut reader = WavReader::open(source)?;
     let spec = reader.spec();
@@ -368,8 +409,9 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
 
     let mut notes: Vec<Note> = Vec::new();
     let mut last_committed_set = HashSet::new();
-    let mut last_note_set = HashSet::new();
+    let mut last_note_set = HashSet::<Pitch>::new();
     let mut stable_set_counter = 0;
+    let mut previous_magnitudes = vec![vec![0.0; WINDOW_SIZE]; NOTE_STABILITY_THRESHOLD];//todo: use this to detect new notes vs. still ringing ones! a double ended que may be even better!
 
     for (window_idx, window) in samples.windows(WINDOW_SIZE).step_by(HOP_SIZE).enumerate() {
         for i in 0..WINDOW_SIZE {
@@ -388,12 +430,12 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
 
         peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         
-        let current_note_set: HashSet<u8> = peaks.iter().take(MAX_NOTES)
+        let current_note_set: HashSet<Pitch> = peaks.iter().take(MAX_NOTES)
             .map(|(idx, _power)| {
                 let freq = *idx as f32 * sample_rate / WINDOW_SIZE as f32;
-                freq_to_midi(freq).round() as u8
+                freq_to_pitch(freq)
             })
-            .filter_map(|midi| find_closest_note_in_tuning(midi, tuning))
+            .filter_map(|pitch| find_closest_note_in_tuning(pitch, tuning))
             .collect();
         
         if current_note_set == last_note_set {
@@ -406,11 +448,11 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
         if stable_set_counter == NOTE_STABILITY_THRESHOLD && !last_note_set.is_empty() && last_note_set != last_committed_set {
             let position = (window_idx * HOP_SIZE) as f64 / sample_rate as f64;
             println!("Detected Chord: {:?}, Time: {:.2}s", last_note_set, position);
-            for &midi in &last_note_set {
-                notes.push(Note { midi, position });
+            for &pitch in &last_note_set {
+                notes.push(Note { pitch, position });
             }
             last_committed_set = last_note_set.clone();
-        }
+        }        
     }
     
     let song_title = source.file_stem().unwrap().to_str().unwrap().to_string();
@@ -430,8 +472,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tuning = KoraTuning {
         name: tuning_name.clone(),
-        left: config.get(&tuning_name, "left").ok_or("Left tuning missing")?.split(',').map(note_to_midi).collect(),
-        right: config.get(&tuning_name, "right").ok_or("Right tuning missing")?.split(',').map(note_to_midi).collect(),
+        left: config.get(&tuning_name, "left").ok_or("Left tuning missing")?.split(',').filter_map(note_to_pitch).collect(),
+        right: config.get(&tuning_name, "right").ok_or("Right tuning missing")?.split(',').filter_map(note_to_pitch).collect(),
     };
 
     let (song_title, notes) = if is_audio {
