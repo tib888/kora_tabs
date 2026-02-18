@@ -142,8 +142,8 @@ fn draw_kora_system(mut doc: Document, y_off: f64, m_num: i32, margin: f64, widt
             .set("x2", width - margin).set("y2", y)
             .set("stroke", "#E8E8E8").set("stroke-width", 1));
     }
-    doc = doc.add(Line::new().set("x1", margin).set("y1", y_off).set("x2", margin).set("y2", y_off + 250.0).set("stroke", "#444").set("stroke-width", 2));
-    doc = doc.add(Line::new().set("x1", width - margin).set("y1", y_off).set("x2", width - margin).set("y2", y_off + 250.0).set("stroke", "#444").set("stroke-width", 2));
+    // doc = doc.add(Line::new().set("x1", margin).set("y1", y_off).set("x2", margin).set("y2", y_off + 250.0).set("stroke", "#444").set("stroke-width", 2));
+    // doc = doc.add(Line::new().set("x1", width - margin).set("y1", y_off).set("x2", width - margin).set("y2", y_off + 250.0).set("stroke", "#444").set("stroke-width", 2));
     doc
 }
 
@@ -208,7 +208,7 @@ fn draw_svg(
             if current_x > (page_width - margin * 2.0) {
                 current_x = note_spacing;
                 measure_count += 1; 
-                current_y_offset += system_height;
+                current_y_offset += system_height; 
                 svg_doc = draw_kora_system(svg_doc, current_y_offset, measure_count, margin, page_width);
             }
             
@@ -217,7 +217,7 @@ fn draw_svg(
                 .set("x1", margin + current_x)
                 .set("y1", current_y_offset)
                 .set("x2", margin + current_x)
-                .set("y2", current_y_offset + 250.0)
+                .set("y2", current_y_offset + 11.0 * 25.0)
                 .set("stroke", "#90EE90") // lightgreen
                 .set("stroke-width", 1));
         }
@@ -286,14 +286,14 @@ fn draw_ascii(
         
         // 1. Create canvas with background and vertical lines
         let mut canvas: Vec<Vec<char>> = vec![vec!['-'; system_width]; 11];
-        for row in 0..11 {
+        canvas.push(vec![' '; system_width]);// Extra line for possible 22th string
+        for row in 0..12 {
             for pos_idx in 0..num_positions {
                 // Center the bar in each position
                 canvas[row][pos_idx * POS_WIDTH + (POS_WIDTH / 2)] = '|';
             }
         }
-        canvas.push(vec![' '; system_width]);// Extra line for 22th string if needed
-        
+
         // 2. Overwrite with notes
         for (pos_idx, pos_key) in chunk.iter().enumerate() {
             let chord = notes_by_pos.get(pos_key).unwrap();
