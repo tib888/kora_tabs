@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use configparser::ini::Ini;
 use hound::WavReader;
 use rustfft::{FftPlanner, num_complex::Complex};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::ops::Add;
 use std::path::PathBuf;
@@ -397,8 +397,8 @@ fn find_closest_note_in_tuning(pitch: Pitch, tuning: &KoraTuning) -> Option<Stri
 
 fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Vec<Note>), Box<dyn std::error::Error>> {
     //this image used for debug, contains the log-log spectrogram with the detected notes
-    const IMG_WIDTH: u32 = 1600;
-    const MAX_IMG_HEIGHT: u32 = 3200;
+    const IMG_WIDTH: u32 = 800;
+    const MAX_IMG_HEIGHT: u32 = 8000;
     let mut img = RgbImage::new(IMG_WIDTH, MAX_IMG_HEIGHT);
     let mut final_height = 0;
 
@@ -420,12 +420,12 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
         4096
     }).next_power_of_two().max(1024).min(16384);
 
-    let hop_size = (0.01 * sample_rate).round() as usize;
+    let hop_size = (0.025 * sample_rate).round() as usize;
 
     const HISTORY_LENGTH: usize = 5;
-    //const NOTE_STABILITY_THRESHOLD: usize = 5;
-    const MAX_NOTES: usize = 4;
-    const ONSET_FACTOR: f32 = 2.0;
+    const PEAK_HISTORY_LENGTH: usize = 3;
+    //const MAX_NOTES: usize = 10;
+    const ONSET_FACTOR: f32 = 4.0;
     const ADAPTIVE_THRESHOLD_FACTOR: f32 = 10.0;
 
     let samples: Vec<f32> = reader.samples::<i16>()
@@ -442,7 +442,7 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
 
     let mut notes: Vec<Note> = Vec::new();
     let mut magnitude_history: std::collections::VecDeque<Vec<f32>> = std::collections::VecDeque::with_capacity(HISTORY_LENGTH);
-    //let mut pitch_history: std::collections::VecDeque<Vec<usize>> = std::collections::VecDeque::with_capacity(NOTE_STABILITY_THRESHOLD);
+    let mut peak_history: std::collections::VecDeque<Vec<Pitch>> = std::collections::VecDeque::with_capacity(PEAK_HISTORY_LENGTH);
 
     for (window_idx, window) in samples.windows(window_size).step_by(hop_size).enumerate() {
         for i in 0..window_size {
@@ -463,7 +463,7 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
             //     .fold(0.0, f32::max)
             //     .max(1.0);
 
-            let max_log_mag = 8.0;
+            let max_log_mag = 6.0;
 
             for x in 0..IMG_WIDTH {
                 let log_i = (x as f32 / (IMG_WIDTH - 1) as f32) * log_num_bins;
@@ -498,20 +498,12 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
             }
         }
         
-        if magnitude_history.len() == HISTORY_LENGTH {
+        if magnitude_history.len() >= HISTORY_LENGTH {
             magnitude_history.pop_front();
         }
         magnitude_history.push_back(magnitudes);
 
         peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        
-        let current_note_set: HashSet<StringInfo> = peaks.iter().take(MAX_NOTES)
-            .map(|(idx, _power)| {
-                let freq = *idx as f32 * sample_rate / window_size as f32;
-                freq_to_pitch(freq)
-            })
-            .filter_map(|pitch| find_closest_note_in_tuning(pitch, tuning))
-            .collect();
 
         if window_idx < MAX_IMG_HEIGHT as usize {
             let peak_indices: std::collections::HashSet<usize> = peaks.iter().map(|(p, _)| *p).collect();
@@ -537,22 +529,46 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
                     }
                 }
             }
+        }
 
-            for note in &current_note_set {
-                let freq= pitch_to_freq(&note.pitch);
-                let peak_idx = (freq * window_size as f32 / sample_rate) as usize;                    
-                let log_peak_idx = (peak_idx as f32).log10();
-                let x = ((log_peak_idx / log_num_bins) * (IMG_WIDTH - 1) as f32).round() as u32;
-                if x < IMG_WIDTH {
-                    img.put_pixel(x, window_idx as u32, Rgb([0, 255, 0]));
+        let current_peaks: Vec<Pitch> = peaks.iter().filter_map(|(idx, magnitude)| {
+            if magnitude * 4.0 < peaks[0].1 {
+                return None;
+            }
+            let freq = *idx as f32 * sample_rate / window_size as f32;
+            Some(freq_to_pitch(freq))
+        }).collect();
+                
+        let position = (window_idx * hop_size) as f64 / sample_rate as f64;
+        let snapped_position = (position * 25.0).round() / 25.0; // Round to nearest 1/25 second to collect the notes picked together
+        for &peak in &current_peaks {            
+            if peak_history.len() >= PEAK_HISTORY_LENGTH {
+                let stable_peak = peak_history.iter().filter(|peak_set| peak_set.contains(&peak)).count() >= PEAK_HISTORY_LENGTH - 1;
+                let new_peak = !peak_history.front().map_or(false, |last_set| last_set.contains(&peak));
+                if stable_peak && new_peak {
+                    if let Some(string_info) = find_closest_note_in_tuning(peak, tuning) {
+                        notes.push(Note { pitch: string_info.pitch, position:snapped_position });
+
+                        if window_idx < MAX_IMG_HEIGHT as usize {
+                            let freq= pitch_to_freq(&string_info.pitch);
+                            let peak_idx = (freq * window_size as f32 / sample_rate) as usize;                    
+                            let log_peak_idx = (peak_idx as f32).log10();
+                            let x = ((log_peak_idx / log_num_bins) * (IMG_WIDTH - 1) as f32).round() as u32;
+                            if x < IMG_WIDTH {
+                                img.put_pixel(x, window_idx as u32, Rgb([0, 255, 0]));
+                                img.put_pixel(x-1, window_idx as u32, Rgb([0, 255, 0]));//repeat to be more visible
+                                img.put_pixel(x+1, window_idx as u32, Rgb([0, 255, 0]));//repeat to be more visible
+                            }
+                        }
+                    }
                 }
             }
+        }   
+
+        if peak_history.len() >= PEAK_HISTORY_LENGTH {
+            peak_history.pop_front();
         }
-        
-        let position = (window_idx * hop_size) as f64 / sample_rate as f64;
-        for &note in &current_note_set {
-            notes.push(Note { pitch: note.pitch, position });
-        }    
+        peak_history.push_back(current_peaks);         
     }
     
     if final_height > 0 {
