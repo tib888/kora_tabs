@@ -30,8 +30,8 @@ enum Commands {
         #[arg(short, long)]
         tuning: String,
         /// Output format.
-        #[arg(long, default_value = "svg")]
-        format: String,
+        #[arg(long)]
+        format: Option<String>,
     },
     /// Transcribes a WAV audio file into a Kora tab.
     Transcribe {
@@ -43,8 +43,8 @@ enum Commands {
         #[arg(short, long)]
         tuning: String,
         /// Output format.
-        #[arg(long, default_value = "svg")]
-        format: String,
+        #[arg(long)]
+        format: Option<String>,
     },
 }
 
@@ -61,7 +61,7 @@ impl Add for Pitch {
 #[derive(Debug, Copy, Clone)]
 struct Note {
     pitch: Pitch,
-    position: f64, // General-purpose position, time in seconds for audio, or beat count for XML
+    position: f64, // Position in quarter notes
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -343,6 +343,131 @@ fn draw_ascii(
 }
 
 
+fn draw_musicxml(song_title: &str, notes: &[Note]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut xml = String::new();
+    xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    xml.push_str("<!DOCTYPE score-partwise PUBLIC \"-//Recordare//DTD MusicXML 4.0 Partwise//EN\" \"http://www.musicxml.org/dtds/partwise.dtd\">\n");
+    xml.push_str("<score-partwise version=\"4.0\">\n");
+
+    xml.push_str(&format!("  <work>\n    <work-title>{}</work-title>\n  </work>\n", song_title));
+
+    xml.push_str("  <part-list>\n");
+    xml.push_str("    <score-part id=\"P1\">\n      <part-name>Kora</part-name>\n    </score-part>\n");
+    xml.push_str("  </part-list>\n");
+
+    xml.push_str("  <part id=\"P1\">\n");
+
+    let divisions = 24;
+    let _tempo = 120.0;//bpm
+
+    let mut notes_by_pos: std::collections::BTreeMap<i64, Vec<&Note>> = std::collections::BTreeMap::new();
+    for note in notes {
+        let pos_in_divisions = (note.position * divisions as f64).round() as i64;
+        notes_by_pos.entry(pos_in_divisions).or_default().push(note);
+    }
+    
+    let measure_divisions = 4 * divisions;
+    let mut measure_number = 1;
+    xml.push_str(&format!("    <measure number=\"{}\">\n", measure_number));
+    xml.push_str("      <attributes>\n");
+    xml.push_str(&format!("        <divisions>{}</divisions>\n", divisions));
+    xml.push_str("        <key><fifths>0</fifths></key>\n");
+    xml.push_str("        <time><beats>4</beats><beat-type>4</beat-type></time>\n");
+    xml.push_str("        <clef><sign>G</sign><line>2</line></clef>\n");
+    xml.push_str("      </attributes>\n");
+
+    let mut position_in_score: i64 = 0;
+
+    for (event_pos, chord_notes) in notes_by_pos {
+        let rest_duration = event_pos - position_in_score;
+        if rest_duration > 0 {
+            let mut remaining_rest = rest_duration;
+            while remaining_rest > 0 {
+                let current_measure_pos = position_in_score % measure_divisions;
+                let space_left_in_measure = measure_divisions - current_measure_pos;
+                let rest_to_write = remaining_rest.min(space_left_in_measure);
+                
+                if rest_to_write > 0 {
+                    xml.push_str(&format!("      <note>\n        <rest/>\n        <duration>{}</duration>\n      </note>\n", rest_to_write));
+                }
+                
+                position_in_score += rest_to_write;
+                remaining_rest -= rest_to_write;
+
+                if position_in_score % measure_divisions == 0 && remaining_rest > 0 {
+                    xml.push_str("    </measure>\n");
+                    measure_number += 1;
+                    xml.push_str(&format!("    <measure number=\"{}\">\n", measure_number));
+                }
+            }
+        }
+        
+        let note_duration = 12; // 8th note
+        let mut first_note = true;
+        for note in chord_notes {
+            let (step, octave, alter) = pitch_to_xml_parts(note.pitch);
+            xml.push_str("      <note>\n");
+            if !first_note {
+                xml.push_str("        <chord/>\n");
+            }
+            xml.push_str("        <pitch>\n");
+            xml.push_str(&format!("          <step>{}</step>\n", step));
+            if alter != 0.0 {
+                xml.push_str(&format!("          <alter>{}</alter>\n", alter));
+            }
+            xml.push_str(&format!("          <octave>{}</octave>\n", octave));
+            xml.push_str("        </pitch>\n");
+            xml.push_str(&format!("        <duration>{}</duration>\n", note_duration));
+            xml.push_str("      </note>\n");
+            first_note = false;
+        }
+
+        position_in_score += note_duration;
+        if position_in_score % measure_divisions == 0 {
+             xml.push_str("    </measure>\n");
+             measure_number += 1;
+             xml.push_str(&format!("    <measure number=\"{}\">\n", measure_number));
+        }
+    }
+
+    let current_measure_pos = position_in_score % measure_divisions;
+    if current_measure_pos != 0 {
+        let rest_to_fill = measure_divisions - current_measure_pos;
+        xml.push_str(&format!("      <note>\n        <rest/>\n        <duration>{}</duration>\n      </note>\n", rest_to_fill));
+        xml.push_str("    </measure>\n");
+    } else {
+        if !xml.ends_with("</measure>\n") {
+             xml.push_str("    </measure>\n");
+        }
+    }
+
+    xml.push_str("  </part>\n");
+    xml.push_str("</score-partwise>\n");
+
+    Ok(xml)
+}
+
+fn pitch_to_xml_parts(p: Pitch) -> (String, i32, f32) {
+    let total_cents = p.0;
+    let note_num = (total_cents as f32 / 100.0).round() as i32;
+    let alter_cents = total_cents - note_num * 100;
+
+    let octave = note_num / 12 - 1;
+    let note_name = match note_num % 12 {
+        0 => "C", 1 => "C", 2 => "D", 3 => "D", 4 => "E", 5 => "F",
+        6 => "F", 7 => "G", 8 => "G", 9 => "A", 10 => "A", 11 => "B",
+        _ => unreachable!(),
+    };
+    let base_alter = match note_num % 12 {
+        1 | 3 | 6 | 8 | 10 => 1.0,
+        _ => 0.0,
+    };
+
+    let final_alter = base_alter + (alter_cents as f32 / 100.0);
+    (note_name.to_string(), octave, final_alter)
+}
+
+
 fn parse_musicxml(source: &PathBuf) -> Result<(String, Vec<Note>), Box<dyn std::error::Error>> {
     let xml_data = fs::read_to_string(source)?;
     let opt = ParsingOptions { allow_dtd: true, ..Default::default() };
@@ -354,28 +479,78 @@ fn parse_musicxml(source: &PathBuf) -> Result<(String, Vec<Note>), Box<dyn std::
         .unwrap_or("Untitled Kora Piece").to_string();
 
     let mut notes = Vec::new();
-    let mut current_pos = 0.0;
-    let note_spacing = 1.0; // Arbitrary position increment
+    let mut current_pos_in_divisions = 0.0;
+    let mut divisions = 1.0;
 
-    for measure in doc_xml.descendants().filter(|n| n.has_tag_name("measure")) {
-        for note_node in measure.children().filter(|n| n.has_tag_name("note")) {
-            let is_chord = note_node.children().any(|n| n.has_tag_name("chord"));
-            if !is_chord {
-                current_pos += note_spacing;
-            }
+    if let Some(part) = doc_xml.descendants().find(|n| n.has_tag_name("part")) {
+        for measure in part.children().filter(|n| n.has_tag_name("measure")) {
+            for element in measure.children().filter(|n| n.is_element()) {
+                match element.tag_name().name() {
+                    "attributes" => {
+                        if let Some(divs) = element.descendants().find(|d| d.has_tag_name("divisions")) {
+                            divisions = divs.text().unwrap().parse().unwrap_or(divisions);
+                        }
+                    },
+                    "note" => {
+                        let position_in_quarters = current_pos_in_divisions / divisions;
+                        if let Some(pitch_node) = element.children().find(|n| n.has_tag_name("pitch")) {
+                            let step = pitch_node.children().find(|n| n.has_tag_name("step")).unwrap().text().unwrap();
+                            let octave = pitch_node.children().find(|n| n.has_tag_name("octave")).unwrap().text().unwrap();
+                            let alter = pitch_node.children().find(|n| n.has_tag_name("alter")).map(|n| n.text().unwrap()).unwrap_or("0");
+                            if let Some((base_pitch, _name)) = note_to_pitch(&format!("{}{}", step, octave)) {
+                                let alter_cents = alter.parse::<f32>().map(|a| (a * 100.0) as i32).unwrap_or(0);
+                                let pitch = base_pitch + Pitch(alter_cents);
+                                notes.push(Note { pitch, position: position_in_quarters });
+                            }
+                        }
 
-            if let Some(pitch_node) = note_node.children().find(|n| n.has_tag_name("pitch")) {
-                let step = pitch_node.children().find(|n| n.has_tag_name("step")).unwrap().text().unwrap();
-                let octave = pitch_node.children().find(|n| n.has_tag_name("octave")).unwrap().text().unwrap();
-                let alter = pitch_node.children().find(|n| n.has_tag_name("alter")).map(|n| n.text().unwrap()).unwrap_or("0");
-                if let Some((base_pitch, _name)) = note_to_pitch(&format!("{}{}", step, octave)) {
-                    let alter_cents = alter.parse::<f32>().map(|a| (a * 100.0) as i32).unwrap_or(0);
-                    let pitch = base_pitch + Pitch(alter_cents);
-                    notes.push(Note { pitch, position: current_pos });
+                        if !element.children().any(|c| c.has_tag_name("chord")) {
+                            if let Some(duration) = element.descendants().find(|d| d.has_tag_name("duration")) {
+                                current_pos_in_divisions += duration.text().unwrap().parse().unwrap_or(0.0);
+                            }
+                        }
+                    },
+                    "backup" => {
+                        if let Some(duration) = element.descendants().find(|d| d.has_tag_name("duration")) {
+                            current_pos_in_divisions -= duration.text().unwrap().parse().unwrap_or(0.0);
+                        }
+                    },
+                    "forward" => {
+                        if let Some(duration) = element.descendants().find(|d| d.has_tag_name("duration")) {
+                            current_pos_in_divisions += duration.text().unwrap().parse().unwrap_or(0.0);
+                        }
+                    },
+                    _ => (),
                 }
             }
         }
     }
+    
+    if notes.is_empty() { // Fallback for simple/malformed XML
+        let mut current_pos = 0.0;
+        let note_spacing = 1.0; // Arbitrary position increment
+    
+        for measure in doc_xml.descendants().filter(|n| n.has_tag_name("measure")) {
+            for note_node in measure.children().filter(|n| n.has_tag_name("note")) {
+                let is_chord = note_node.children().any(|n| n.has_tag_name("chord"));
+                if !is_chord {
+                    current_pos += note_spacing;
+                }
+    
+                if let Some(pitch_node) = note_node.children().find(|n| n.has_tag_name("pitch")) {
+                    let step = pitch_node.children().find(|n| n.has_tag_name("step")).unwrap().text().unwrap();
+                    let octave = pitch_node.children().find(|n| n.has_tag_name("octave")).unwrap().text().unwrap();
+                    let alter = pitch_node.children().find(|n| n.has_tag_name("alter")).map(|n| n.text().unwrap()).unwrap_or("0");
+                    if let Some((base_pitch, _name)) = note_to_pitch(&format!("{}{}", step, octave)) {
+                        let alter_cents = alter.parse::<f32>().map(|a| (a * 100.0) as i32).unwrap_or(0);
+                        let pitch = base_pitch + Pitch(alter_cents);
+                        notes.push(Note { pitch, position: current_pos });
+                    }
+                }
+            }
+        }
+    }
+
     Ok((song_title, notes))
 }
 
@@ -545,14 +720,16 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
         }).collect();
                 
         let position = (window_idx * hop_size) as f64 / sample_rate as f64;
-        let snapped_position = (position * 25.0).round() / 25.0; // Round to nearest 1/25 second to collect the notes picked together
+        let snapped_position = (position * 48.0).round() / 48.0; // Round to nearest 1/24 beat collect the notes picked together
+        let quarter_duration_secs = 0.5; // at 120bpm
+        let position_in_quarters = snapped_position / quarter_duration_secs;
         for &peak in &current_peaks {            
             if peak_history.len() >= PEAK_HISTORY_LENGTH {
                 let stable_peak = peak_history.iter().filter(|peak_set| peak_set.contains(&peak)).count() >= PEAK_HISTORY_LENGTH - 1;
                 let new_peak = !peak_history.front().map_or(false, |last_set| last_set.contains(&peak));
                 if stable_peak && new_peak {
                     if let Some(string_info) = find_closest_note_in_tuning(peak, tuning) {
-                        notes.push(Note { pitch: string_info.pitch, position:snapped_position });
+                        notes.push(Note { pitch: string_info.pitch, position:position_in_quarters });
 
                         if window_idx < MAX_IMG_HEIGHT as usize {
                             let freq= pitch_to_freq(&string_info.pitch);
@@ -588,25 +765,33 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     
-    let (source, output, tuning_name, format, is_audio) = match args.command {
+    let (source, output, tuning_name, format_option, is_audio) = match args.command {
         Commands::Draw { source, output, tuning, format } => (source, output, tuning, format, false),
         Commands::Transcribe { source, output, tuning, format } => (source, output, tuning, format, true),
+    };
+
+    let format = match format_option {
+        Some(f) => f,
+        None => {
+            output.extension()
+                .and_then(std::ffi::OsStr::to_str)
+                .map(|s| s.to_lowercase())
+                .unwrap_or_default() // empty string if no extension
+        }
     };
 
     let mut config = Ini::new();
     config.load("tuning.ini").map_err(|e| format!("INI Load Error: {}", e))?;
 
-    // let mut notes  = Vec::<StringInfo>::new();
-    
     let mut notes: Vec<StringInfo> = config.get(&tuning_name, "left").ok_or("Left tuning missing")?.split(',').enumerate()
-        .map(|info| {
-            let (pitch, name) = note_to_pitch(info.1).unwrap();
-            StringInfo { pitch, right: false, index: info.0 as u8, name }
+        .map(|(idx, note)| {
+            let (pitch, name) = note_to_pitch(note).unwrap();
+            StringInfo { pitch, right: false, index: idx as u8, name }
         }).chain(
         config.get(&tuning_name, "right").ok_or("Right tuning missing")?.split(',').enumerate()
-        .map(|info| {
-            let (pitch, name) = note_to_pitch(info.1).unwrap();
-            StringInfo { pitch, right: true, index: info.0 as u8, name }
+        .map(|(idx, note)| {
+            let (pitch, name) = note_to_pitch(note).unwrap();
+            StringInfo { pitch, right: true, index: idx as u8, name }
         })).collect();
     notes.sort_by_key(|note| note.pitch.0);
 
@@ -622,14 +807,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     
     match format.as_str() {
-        "ascii" => {
+        "ascii" | "txt" => {
             let ascii_output = draw_ascii(&song_title, &tuning, &notes)?;
             fs::write(&output, ascii_output)?;
         },
-        "svg" => {
+        "svg" | "" => { // Default to svg
             draw_svg(&output, &song_title, &tuning, &notes)?;
         },
-        _ => return Err(format!("Unsupported format: {}", format).into()),
+        "musicxml" | "xml" => {
+            let musicxml_output = draw_musicxml(&song_title, &notes)?;
+            fs::write(&output, musicxml_output)?;
+        },
+        _ => return Err(format!("Unsupported format or unknown extension: '{}'", format).into()),
     }
     
     println!("Success! Tab for '{}' generated at '{}'.", song_title, output.display());
