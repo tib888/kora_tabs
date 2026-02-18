@@ -600,13 +600,13 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
         4096
     }).next_power_of_two().max(1024).min(16384);
 
-    let hop_size = (0.025 * sample_rate).round() as usize;
+    let hop_size = (sample_rate / 48.0).round() as usize;
 
     const HISTORY_LENGTH: usize = 5;
     const PEAK_HISTORY_LENGTH: usize = 3;
     //const MAX_NOTES: usize = 10;
     const ONSET_FACTOR: f32 = 4.0;
-    const ADAPTIVE_THRESHOLD_FACTOR: f32 = 10.0;
+    const ADAPTIVE_THRESHOLD_FACTOR: f32 = 1.0;
 
     let samples: Vec<f32> = reader.samples::<i16>()
         .map(|s| s.unwrap() as f32 / i16::MAX as f32)
@@ -657,16 +657,18 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
             }
         }
         
-        let mut sorted_magnitudes = magnitudes.iter().cloned().collect::<Vec<_>>();
-        if sorted_magnitudes.is_empty() { continue; }
-        sorted_magnitudes.sort_by(|a,b| a.partial_cmp(b).unwrap());
-        let median_magnitude = sorted_magnitudes[sorted_magnitudes.len() / 2];
-        let power_threshold = (median_magnitude * ADAPTIVE_THRESHOLD_FACTOR).max(10.0);
+        // let mut sorted_magnitudes = magnitudes.iter().cloned().collect::<Vec<_>>();
+        // if sorted_magnitudes.is_empty() { continue; }
+        // sorted_magnitudes.sort_by(|a,b| a.partial_cmp(b).unwrap());
+        // let median_magnitude = sorted_magnitudes[sorted_magnitudes.len() / 2];
+        // let power_threshold = (median_magnitude * ADAPTIVE_THRESHOLD_FACTOR);//.max(10.0);
+        let power_threshold = 0.01f32;
 
         let mut peaks = Vec::new();//freq index in fft, magnitude
 
-        for i in 1..(magnitudes.len() / 2 - 1) {
-            if magnitudes[i] > power_threshold && magnitudes[i] > magnitudes[i-1] && magnitudes[i] > magnitudes[i+1] {
+        let max_freq_index = magnitudes.len() / 2;//remember Nyquist's law
+        for i in 1..(max_freq_index - 1) {
+            if magnitudes[i] > power_threshold && magnitudes[i] > magnitudes[i - 1] && magnitudes[i] > magnitudes[i + 1] {
                 let is_onset = if magnitude_history.len() == HISTORY_LENGTH {
                     let avg_prev_mag = magnitude_history.iter().map(|m| m[i]).sum::<f32>() / HISTORY_LENGTH as f32;
                     magnitudes[i] > avg_prev_mag * ONSET_FACTOR
@@ -686,10 +688,11 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
         peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
         if window_idx < MAX_IMG_HEIGHT as usize {
-            let peak_indices: std::collections::HashSet<usize> = peaks.iter().map(|(p, _)| *p).collect();
-            for peak_idx in peak_indices {
-                if peak_idx > 0 && peak_idx < num_bins {
-                     let log_peak_idx = (peak_idx as f32).log10();
+
+            //mark the detected peaks with white/gray instead of only blue pixels
+            for (peak_idx, _magnitude) in &peaks {
+                if *peak_idx > 0 && *peak_idx < num_bins {
+                     let log_peak_idx = (*peak_idx as f32).log10();
                      let x = ((log_peak_idx / log_num_bins) * (IMG_WIDTH - 1) as f32).round() as u32;
                      if x < IMG_WIDTH {
                         let color = img.get_pixel(x, window_idx as u32);
@@ -699,9 +702,10 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
             }
 
             if window_idx % 10 == 0 {
+                //mark the exact freq of possible notes in the tuning with red dots
                 for note in tuning.notes.iter() {
                     let freq= pitch_to_freq(&note.pitch);
-                    let peak_idx = (freq * window_size as f32 / sample_rate) as usize;                    
+                    let peak_idx = (freq * max_freq_index as f32 / sample_rate) as usize;                    
                     let log_peak_idx = (peak_idx as f32).log10();
                     let x = ((log_peak_idx / log_num_bins) * (IMG_WIDTH - 1) as f32).round() as u32;
                     if x < IMG_WIDTH {
@@ -715,14 +719,16 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
             if magnitude * 4.0 < peaks[0].1 {
                 return None;
             }
-            let freq = *idx as f32 * sample_rate / window_size as f32;
+            let freq = *idx as f32 * sample_rate / max_freq_index as f32;
             Some(freq_to_pitch(freq))
         }).collect();
                 
+        // calculate the position in time:
         let position = (window_idx * hop_size) as f64 / sample_rate as f64;
         let snapped_position = (position * 48.0).round() / 48.0; // Round to nearest 1/24 beat collect the notes picked together
         let quarter_duration_secs = 0.5; // at 120bpm
         let position_in_quarters = snapped_position / quarter_duration_secs;
+
         for &peak in &current_peaks {            
             if peak_history.len() >= PEAK_HISTORY_LENGTH {
                 let stable_peak = peak_history.iter().filter(|peak_set| peak_set.contains(&peak)).count() >= PEAK_HISTORY_LENGTH - 1;
@@ -733,7 +739,7 @@ fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Ve
 
                         if window_idx < MAX_IMG_HEIGHT as usize {
                             let freq= pitch_to_freq(&string_info.pitch);
-                            let peak_idx = (freq * window_size as f32 / sample_rate) as usize;                    
+                            let peak_idx = (freq * max_freq_index as f32 / sample_rate) as usize;                    
                             let log_peak_idx = (peak_idx as f32).log10();
                             let x = ((log_peak_idx / log_num_bins) * (IMG_WIDTH - 1) as f32).round() as u32;
                             if x < IMG_WIDTH {
@@ -783,7 +789,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Ini::new();
     config.load("tuning.ini").map_err(|e| format!("INI Load Error: {}", e))?;
 
-    let mut notes: Vec<StringInfo> = config.get(&tuning_name, "left").ok_or("Left tuning missing")?.split(',').enumerate()
+    let mut notes: Vec<StringInfo> = config.get(&tuning_name, "left").ok_or("Left tuning missing or tuning name is misspelled")?.split(',').enumerate()
         .map(|(idx, note)| {
             let (pitch, name) = note_to_pitch(note).unwrap();
             StringInfo { pitch, right: false, index: idx as u8, name }
