@@ -64,12 +64,13 @@ struct Note {
     position: f64, // General-purpose position, time in seconds for audio, or beat count for XML
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct StringInfo
 {
     pitch: Pitch,
     right: bool,
     index: u8,
+    name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -80,7 +81,7 @@ struct KoraTuning {
 
 /// returns midi number * 100 + microtone adjustments in cents
 /// for example "A4+30" gives 1200 * 5 + 900 + 30 = 6930
-fn note_to_pitch(note: &str) -> Option<Pitch> {
+fn note_to_pitch(note: &str) -> Option<(Pitch, String)> {
     let note = note.trim();
     if note.is_empty() { return None; }
 
@@ -125,7 +126,7 @@ fn note_to_pitch(note: &str) -> Option<Pitch> {
     };
     let octave: i32 = octave_str.parse().unwrap_or(4);
     
-    base.map(|base| Pitch((octave + 1) * 1200 + 100 * base + cents))
+    base.map(|base| (Pitch((octave + 1) * 1200 + 100 * base + cents), name.to_string()))
 }
 
 fn draw_kora_system(mut doc: Document, y_off: f64, m_num: i32, margin: f64, width: f64) -> Document {
@@ -155,7 +156,7 @@ fn draw_svg(
     let page_width = 750.0;
     let margin = 60.0;
     let system_height = 340.0; 
-    let note_spacing = 40.0;
+    let note_spacing = 50.0;
     let top_margin = 100.0;
 
     // Simulate layout to determine required height
@@ -221,16 +222,19 @@ fn draw_svg(
                 .set("stroke-width", 1));
         }
         
-        if let Some((idx, is_right)) = tuning.notes.iter().find(|&p| p.pitch == note.pitch).map(|note| (note.index, note.right)) {
-            let color = if is_right { "#FF0000" } else { "#0000FF" }; // Red (Right), Blue (Left)
-            let label = format!("{}", idx + 1);
-            let y_pos = current_y_offset + ((10 - idx) as f64 * 25.0) + 5.0;
+        if let Some(string_info) = tuning.notes.iter().find(|&p| p.pitch == note.pitch) {
+            let color = if string_info.right { "#FF0000" } else { "#0000FF" }; // Red (Right), Blue (Left)
+            
+            let max = if string_info.right { 11 } else { 10 };
+            let line_idx = (max - string_info.index) as usize;
+            let label = (11 - line_idx).to_string() + string_info.name.as_str();
+            let y_pos = current_y_offset + (line_idx as f64 * 25.0) + 5.0;
 
             let text_width = if label.len() > 1 { 16.0 } else { 8.0 };
             let rect_width = text_width + 8.0;
             let rect_height = 16.0;
 
-            let rect_x = if is_right { margin + current_x } else { margin + current_x - rect_width };
+            let rect_x = if string_info.right { margin + current_x } else { margin + current_x - rect_width };
             let rect_y = y_pos - 12.0;
             let x_pos = rect_x + (rect_width / 2.0);
 
@@ -288,24 +292,25 @@ fn draw_ascii(
                 canvas[row][pos_idx * POS_WIDTH + (POS_WIDTH / 2)] = '|';
             }
         }
-
+        canvas.push(vec![' '; system_width]);// Extra line for 22th string if needed
+        
         // 2. Overwrite with notes
         for (pos_idx, pos_key) in chunk.iter().enumerate() {
             let chord = notes_by_pos.get(pos_key).unwrap();
             
             for note in chord {
-                if let Some((idx, is_right)) = tuning.notes.iter().find(|&p| p.pitch == note.pitch).map(|note| (note.index, note.right)) {
-                    
-                    let line_idx = (10 - idx) as usize;                    
-                    let label = (idx + 1).to_string();
+                if let Some(string_info) = tuning.notes.iter().find(|&p| p.pitch == note.pitch) {
+                    let max = if string_info.right { 11 } else { 10 };
+                    let line_idx = (max - string_info.index) as usize;
+                    let label = (11 - line_idx).to_string() + string_info.name.as_str();
                     let label_chars: Vec<char> = label.chars().collect();
                     
                     let col_offset = pos_idx * POS_WIDTH;
                     let bar_col_in_pos = POS_WIDTH / 2;
                     let bar_col_abs = col_offset + bar_col_in_pos;
 
-                    if is_right {
-                        // Place label to the right of the bar, e.g., "...|12.."
+                    if string_info.right {
+                        // Place label to the right of the bar, e.g., "...|10.."
                         let start_col = bar_col_abs + 1;
                         for (i, c) in label_chars.iter().enumerate() {
                             if start_col + i < col_offset + POS_WIDTH {
@@ -313,7 +318,7 @@ fn draw_ascii(
                             }
                         }
                     } else {
-                        // Place label to the left of the bar, e.g., "..12|..."
+                        // Place label to the left of the bar, e.g., "..11|..."
                         let start_col = bar_col_abs - label_chars.len();
                         for (i, c) in label_chars.iter().enumerate() {
                             if start_col + i < bar_col_abs {
@@ -363,7 +368,7 @@ fn parse_musicxml(source: &PathBuf) -> Result<(String, Vec<Note>), Box<dyn std::
                 let step = pitch_node.children().find(|n| n.has_tag_name("step")).unwrap().text().unwrap();
                 let octave = pitch_node.children().find(|n| n.has_tag_name("octave")).unwrap().text().unwrap();
                 let alter = pitch_node.children().find(|n| n.has_tag_name("alter")).map(|n| n.text().unwrap()).unwrap_or("0");
-                if let Some(base_pitch) = note_to_pitch(&format!("{}{}", step, octave)) {
+                if let Some((base_pitch, _name)) = note_to_pitch(&format!("{}{}", step, octave)) {
                     let alter_cents = alter.parse::<f32>().map(|a| (a * 100.0) as i32).unwrap_or(0);
                     let pitch = base_pitch + Pitch(alter_cents);
                     notes.push(Note { pitch, position: current_pos });
@@ -382,12 +387,12 @@ fn pitch_to_freq(p: &Pitch) -> f32 {
     440.0 * 2.0f32.powf((p.0 - 6900) as f32 / 1200.0)
 }
 
-fn find_closest_note_in_tuning(pitch: Pitch, tuning: &KoraTuning) -> Option<StringInfo> {    
+fn find_closest_note_in_tuning(pitch: Pitch, tuning: &KoraTuning) -> Option<&StringInfo> {    
     // Find the note in the tuning with the minimum distance to the detected midi note.
     if let Some(closest_note) = tuning.notes.iter().min_by_key(|&note| (pitch.0 - note.pitch.0).abs()) {
         // Only snap if the distance is within 200 cents threshold.
         if (pitch.0 - closest_note.pitch.0).abs() <= 200 {
-            return Some(*closest_note);
+            return Some(closest_note);
         }
     }
 
@@ -594,9 +599,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // let mut notes  = Vec::<StringInfo>::new();
     
     let mut notes: Vec<StringInfo> = config.get(&tuning_name, "left").ok_or("Left tuning missing")?.split(',').enumerate()
-        .map(|info| StringInfo { pitch: note_to_pitch(info.1).unwrap(), right: false, index: info.0 as u8}).chain(
+        .map(|info| {
+            let (pitch, name) = note_to_pitch(info.1).unwrap();
+            StringInfo { pitch, right: false, index: info.0 as u8, name }
+        }).chain(
         config.get(&tuning_name, "right").ok_or("Right tuning missing")?.split(',').enumerate()
-        .map(|info| StringInfo { pitch: note_to_pitch(info.1).unwrap(), right: true, index: info.0 as u8})).collect();
+        .map(|info| {
+            let (pitch, name) = note_to_pitch(info.1).unwrap();
+            StringInfo { pitch, right: true, index: info.0 as u8, name }
+        })).collect();
     notes.sort_by_key(|note| note.pitch.0);
 
     let tuning = KoraTuning {
