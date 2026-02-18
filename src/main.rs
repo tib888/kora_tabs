@@ -357,8 +357,11 @@ fn parse_musicxml(source: &PathBuf) -> Result<(String, Vec<Note>), Box<dyn std::
                 let step = pitch_node.children().find(|n| n.has_tag_name("step")).unwrap().text().unwrap();
                 let octave = pitch_node.children().find(|n| n.has_tag_name("octave")).unwrap().text().unwrap();
                 let alter = pitch_node.children().find(|n| n.has_tag_name("alter")).map(|n| n.text().unwrap()).unwrap_or("0");
-                let pitch = note_to_pitch(&format!("{}{}", step, octave)).unwrap() + alter.parse::<i32>().map(|a| Pitch(a * 100)).unwrap();
-                notes.push(Note { pitch, position: current_pos });
+                if let Some(base_pitch) = note_to_pitch(&format!("{}{}", step, octave)) {
+                    let alter_cents = alter.parse::<f32>().map(|a| (a * 100.0) as i32).unwrap_or(0);
+                    let pitch = base_pitch + Pitch(alter_cents);
+                    notes.push(Note { pitch, position: current_pos });
+                }
             }
         }
     }
@@ -367,6 +370,10 @@ fn parse_musicxml(source: &PathBuf) -> Result<(String, Vec<Note>), Box<dyn std::
 
 fn freq_to_pitch(freq: f32) -> Pitch {
     Pitch(6900 + (1200.0 * (freq / 440.0).log2()).round() as i32)
+}
+
+fn pitch_to_freq(p: Pitch) -> f32 {
+    440.0 * 2.0f32.powf((p.0 - 6900) as f32 / 1200.0)
 }
 
 fn find_closest_note_in_tuning(pitch: Pitch, tuning: &KoraTuning) -> Option<Pitch> {
@@ -385,74 +392,117 @@ fn find_closest_note_in_tuning(pitch: Pitch, tuning: &KoraTuning) -> Option<Pitc
 }
 
 fn transcribe_audio(source: &PathBuf, tuning: &KoraTuning) -> Result<(String, Vec<Note>), Box<dyn std::error::Error>> {
-    const WINDOW_SIZE: usize = 4096;//todo: calculate the required freq resolution based on the freq difference of the lowest nodes => use that and the sampling frequency to calculate the needed FFT window size and round up to 2^n! 
-    const HOP_SIZE: usize = 1024;//todo: calculate this to be less than 1/32 second (use sampling frequency!)
-    const POWER_THRESHOLD: f32 = 10.0;//this must be different in case of log scales - best would be to make it adaptive!
-    const NOTE_STABILITY_THRESHOLD: usize = 3;
-    const MAX_NOTES: usize = 4;//todo: this should be the max number of new nodes at an instant (older nodes may still ring...)
-
     let mut reader = WavReader::open(source)?;
     let spec = reader.spec();
     let sample_rate = spec.sample_rate as f32;
+
+    let mut all_pitches = tuning.left.clone();
+    all_pitches.extend_from_slice(&tuning.right);
+    all_pitches.sort_by_key(|p| p.0);
+    all_pitches.dedup();
+
+    let min_freq_diff = all_pitches.windows(2)
+        .map(|w| pitch_to_freq(w[1]) - pitch_to_freq(w[0]))        
+        .fold(f32::INFINITY, f32::min);
+
+    let window_size = (if min_freq_diff.is_finite() && min_freq_diff > 0.0 {
+        (sample_rate / min_freq_diff).ceil() as usize
+    } else {
+        4096
+    }).next_power_of_two().max(1024).min(16384);
+
+    let hop_size = (sample_rate / 64.0).round() as usize;
+
+    const NOTE_STABILITY_THRESHOLD: usize = 3;
+    const MAX_NOTES: usize = 4;
+    const ONSET_FACTOR: f32 = 2.0;
+    const ADAPTIVE_THRESHOLD_FACTOR: f32 = 10.0;
 
     let samples: Vec<f32> = reader.samples::<i16>()
         .map(|s| s.unwrap() as f32 / i16::MAX as f32)
         .collect();
 
     let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(WINDOW_SIZE);
-    let mut buffer = vec![Complex::new(0.0, 0.0); WINDOW_SIZE];
+    let fft = planner.plan_fft_forward(window_size);
+    let mut buffer = vec![Complex::new(0.0, 0.0); window_size];
     
-    let hann_window: Vec<f32> = (0..WINDOW_SIZE)
-        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (WINDOW_SIZE - 1) as f32).cos()))
+    let hann_window: Vec<f32> = (0..window_size)
+        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (window_size - 1) as f32).cos()))
         .collect();
 
     let mut notes: Vec<Note> = Vec::new();
-    let mut last_committed_set = HashSet::new();
-    let mut last_note_set = HashSet::<Pitch>::new();
-    let mut stable_set_counter = 0;
-    let mut previous_magnitudes = vec![vec![0.0; WINDOW_SIZE]; NOTE_STABILITY_THRESHOLD];//todo: use this to detect new notes vs. still ringing ones! a double ended que may be even better!
+    //let mut last_committed_set = HashSet::new();
+    //let mut last_note_set = HashSet::<Pitch>::new();
+    //let mut stable_set_counter = 0;
+    let mut magnitude_history: std::collections::VecDeque<Vec<f32>> = std::collections::VecDeque::with_capacity(NOTE_STABILITY_THRESHOLD);
 
-    for (window_idx, window) in samples.windows(WINDOW_SIZE).step_by(HOP_SIZE).enumerate() {
-        for i in 0..WINDOW_SIZE {
+    for (window_idx, window) in samples.windows(window_size).step_by(hop_size).enumerate() {
+        for i in 0..window_size {
             buffer[i] = Complex::new(window[i] * hann_window[i], 0.0);
         }
         fft.process(&mut buffer);
 
         let magnitudes: Vec<f32> = buffer.iter().map(|c| c.norm_sqr()).collect();
-        let mut peaks = Vec::new();
+        
+        let mut sorted_magnitudes = magnitudes.iter().cloned().collect::<Vec<_>>();
+        if sorted_magnitudes.is_empty() { continue; }
+        sorted_magnitudes.sort_by(|a,b| a.partial_cmp(b).unwrap());
+        let median_magnitude = sorted_magnitudes[sorted_magnitudes.len() / 2];
+        let power_threshold = median_magnitude * ADAPTIVE_THRESHOLD_FACTOR;
+
+        let mut peaks = Vec::new();//freq index in fft, magnitude
 
         for i in 1..(magnitudes.len() / 2 - 1) {
-            if magnitudes[i] > POWER_THRESHOLD && magnitudes[i] > magnitudes[i-1] && magnitudes[i] > magnitudes[i+1] {
-                peaks.push((i, magnitudes[i]));
+            //detect a local maximum in the freq graph
+            if magnitudes[i] > power_threshold && magnitudes[i] > magnitudes[i-1] && magnitudes[i] > magnitudes[i+1] {
+                //detect if the magnitude just jumped relative to the previous average
+                let is_onset = if magnitude_history.len() == NOTE_STABILITY_THRESHOLD {
+                    let avg_prev_mag = magnitude_history.iter().map(|m| m[i]).sum::<f32>() / NOTE_STABILITY_THRESHOLD as f32;
+                    magnitudes[i] > avg_prev_mag * ONSET_FACTOR
+                } else { true };
+
+                if is_onset {
+                    peaks.push((i, magnitudes[i]));
+                }
             }
         }
+        
+        if magnitude_history.len() == NOTE_STABILITY_THRESHOLD {
+            magnitude_history.pop_front();
+        }
+        magnitude_history.push_back(magnitudes);
 
+        //look for the loudest few new peaks
         peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         
         let current_note_set: HashSet<Pitch> = peaks.iter().take(MAX_NOTES)
             .map(|(idx, _power)| {
-                let freq = *idx as f32 * sample_rate / WINDOW_SIZE as f32;
+                let freq = *idx as f32 * sample_rate / window_size as f32;
                 freq_to_pitch(freq)
             })
             .filter_map(|pitch| find_closest_note_in_tuning(pitch, tuning))
             .collect();
         
-        if current_note_set == last_note_set {
-            stable_set_counter += 1;
-        } else {
-            last_note_set = current_note_set;
-            stable_set_counter = 1;
-        }
+        // if current_note_set == last_note_set {
+        //     stable_set_counter += 1;
+        // } else {
+        //     last_note_set = current_note_set;
+        //     stable_set_counter = 1;
+        // }
 
-        if stable_set_counter == NOTE_STABILITY_THRESHOLD && !last_note_set.is_empty() && last_note_set != last_committed_set {
-            let position = (window_idx * HOP_SIZE) as f64 / sample_rate as f64;
-            println!("Detected Chord: {:?}, Time: {:.2}s", last_note_set, position);
-            for &pitch in &last_note_set {
+        // if stable_set_counter == NOTE_STABILITY_THRESHOLD && !last_note_set.is_empty() && last_note_set != last_committed_set {
+        //     let position = (window_idx * hop_size) as f64 / sample_rate as f64;
+        //     println!("Detected Chord: {:?}, Time: {:.2}s", last_note_set, position);
+        //     for &pitch in &last_note_set {
+        //         notes.push(Note { pitch, position });
+        //     }
+        //     last_committed_set = last_note_set.clone();
+        // }    
+
+            let position = (window_idx * hop_size) as f64 / sample_rate as f64;
+            for &pitch in &current_note_set {
                 notes.push(Note { pitch, position });
-            }
-            last_committed_set = last_note_set.clone();
-        }        
+            }    
     }
     
     let song_title = source.file_stem().unwrap().to_str().unwrap().to_string();
