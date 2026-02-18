@@ -1,0 +1,16 @@
+#Tomora Ba
+[Silaba]
+left = "F2, C3, D3, E3, G3, Bb3, D4, F4, A4, C5, E5"
+right = "Bb2, F3, A3, C4, E4, G4, Bb4, D5, F5, G5, A5"
+
+[Suarta]
+left = "F2, C3, D3-15, E3+5, G3-15, B3+5, D4-15, F4, A4+5, C5, E5+5"
+right = "B2+5, F3, A3+5, C4, E4+5, G4-15, B4+5, D5-15, F5, G5-15, A5+5"
+# microtonal_intervals = F 185 G 220 A 200 B 95 C 185 D 220 E 95
+#                      F     G-15  A+5   B+5  C     D-15  E+5
+
+[Piano] #use this to detect the needed tunning for a song
+left = "C2, C#2, D2, D#2, E2, F2, F#2, G2, G#2, A2, A#2, B2, C3, C#3, D3, D#3, E3, F3, F#3, G3, G#3, A3, A#3, B3" 
+right = "C4, C#4, D4, D#4, E4, F4, F#4, G4, G#4, A4, A#4, B4, C5, C#5, D5, D#5, E5, F5, F#5, G5, G#5, A5, A#5, B5"
+
+

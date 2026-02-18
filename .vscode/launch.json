@@ -8,10 +8,12 @@
             "program": "${workspaceFolder}/target/debug/koratabs.exe",
             "args": [
                 "transcribe",
-                "tunga.wav",
-                "my_tab.svg",
+                "Jarabi.wav",
+                "Jarabi.msxml",
                 "--tuning",
-                "Silaba"
+                "Suarta",
+                "--format",
+                "msxml"
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",

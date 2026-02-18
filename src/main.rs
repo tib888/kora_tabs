@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
-use configparser::ini::Ini;
+use serde::Deserialize;
+use toml;
 use hound::WavReader;
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::collections::HashMap;
@@ -26,7 +27,7 @@ enum Commands {
         source: PathBuf,
         /// Path for the output file.
         output: PathBuf,
-        /// Name of the tuning to use from tuning.ini.
+        /// Name of the tuning to use from tuning.toml.
         #[arg(short, long)]
         tuning: String,
         /// Output format.
@@ -39,7 +40,7 @@ enum Commands {
         source: PathBuf,
         /// Path for the output file.
         output: PathBuf,
-        /// Name of the tuning to use from tuning.ini.
+        /// Name of the tuning to use from tuning.toml.
         #[arg(short, long)]
         tuning: String,
         /// Output format.
@@ -77,6 +78,12 @@ struct StringInfo
 struct KoraTuning {
     name: String,
     notes: Vec<StringInfo>
+}
+
+#[derive(Debug, Deserialize)]
+struct Tuning {
+    left: String,
+    right: String,
 }
 
 /// returns midi number * 100 + microtone adjustments in cents
@@ -226,7 +233,7 @@ fn draw_svg(
             let color = if string_info.right { "#FF0000" } else { "#0000FF" }; // Red (Right), Blue (Left)
             
             let max = if string_info.right { 11 } else { 10 };
-            let line_idx = (max - string_info.index) as usize;
+            let line_idx = (max - string_info.index) as i32;
             let label = (11 - line_idx).to_string() + string_info.name.as_str();
             let y_pos = current_y_offset + (line_idx as f64 * 25.0) + 5.0;
 
@@ -301,7 +308,7 @@ fn draw_ascii(
             for note in chord {
                 if let Some(string_info) = tuning.notes.iter().find(|&p| p.pitch == note.pitch) {
                     let max = if string_info.right { 11 } else { 10 };
-                    let line_idx = (max - string_info.index) as usize;
+                    let line_idx = (max - string_info.index) as i32;
                     let label = (11 - line_idx).to_string() + string_info.name.as_str();
                     let label_chars: Vec<char> = label.chars().collect();
                     
@@ -313,16 +320,16 @@ fn draw_ascii(
                         // Place label to the right of the bar, e.g., "...|10.."
                         let start_col = bar_col_abs + 1;
                         for (i, c) in label_chars.iter().enumerate() {
-                            if start_col + i < col_offset + POS_WIDTH {
-                                canvas[line_idx][start_col + i] = *c;
+                            if start_col + i < col_offset + POS_WIDTH && line_idx >= 0 && line_idx <= 11 {
+                                canvas[line_idx as usize][start_col + i] = *c;
                             }
                         }
                     } else {
                         // Place label to the left of the bar, e.g., "..11|..."
                         let start_col = bar_col_abs - label_chars.len();
                         for (i, c) in label_chars.iter().enumerate() {
-                            if start_col + i < bar_col_abs {
-                                canvas[line_idx][start_col + i] = *c;
+                            if start_col + i < bar_col_abs && line_idx >= 0 && line_idx <= 11 {
+                                canvas[line_idx as usize][start_col + i] = *c;
                             }
                         }
                     }
@@ -786,15 +793,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let mut config = Ini::new();
-    config.load("tuning.ini").map_err(|e| format!("INI Load Error: {}", e))?;
+    let config_str = fs::read_to_string("tuning.toml").map_err(|e| format!("TOML Load Error: {}", e))?;
+    let all_tunings: HashMap<String, Tuning> = toml::from_str(&config_str).map_err(|e| format!("TOML Parse Error: {}", e))?;
 
-    let mut notes: Vec<StringInfo> = config.get(&tuning_name, "left").ok_or("Left tuning missing or tuning name is misspelled")?.split(',').enumerate()
+    let tuning_config = all_tunings.get(&tuning_name).ok_or_else(|| format!("Tuning '{}' not found in tuning.toml", tuning_name))?;
+
+    let mut notes: Vec<StringInfo> = tuning_config.left.split(',').enumerate()
         .map(|(idx, note)| {
             let (pitch, name) = note_to_pitch(note).unwrap();
             StringInfo { pitch, right: false, index: idx as u8, name }
         }).chain(
-        config.get(&tuning_name, "right").ok_or("Right tuning missing")?.split(',').enumerate()
+        tuning_config.right.split(',').enumerate()
         .map(|(idx, note)| {
             let (pitch, name) = note_to_pitch(note).unwrap();
             StringInfo { pitch, right: true, index: idx as u8, name }
