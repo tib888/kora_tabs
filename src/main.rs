@@ -272,9 +272,9 @@ fn draw_svg(
                 "#0000FF"
             }; // Red (Right), Blue (Left)
 
-            let max = if string_info.right { 11 } else { 10 };
-            let line_idx = (max - string_info.index) as i32;
-            let label = (11 - line_idx).to_string() + string_info.name.as_str();
+            let max = if string_info.right { 11i32 } else { 10i32 };
+            let line_idx = max - string_info.index as i32;
+            let label = (11i32 - line_idx).to_string() + string_info.name.as_str();
             let y_pos = current_y_offset + (line_idx as f64 * 25.0) + 5.0;
 
             let text_width = if label.len() > 1 { 16.0 } else { 8.0 };
@@ -364,9 +364,9 @@ fn draw_ascii(
 
             for note in chord {
                 if let Some(string_info) = tuning.notes.iter().find(|&p| p.pitch == note.pitch) {
-                    let max = if string_info.right { 11 } else { 10 };
-                    let line_idx = (max - string_info.index) as i32;
-                    let label = (11 - line_idx).to_string() + string_info.name.as_str();
+                    let max = if string_info.right { 11i32 } else { 10i32 };
+                    let line_idx = max - string_info.index as i32;
+                    let label = (11i32 - line_idx).to_string() + string_info.name.as_str();
                     let label_chars: Vec<char> = label.chars().collect();
 
                     let col_offset = pos_idx * POS_WIDTH;
@@ -749,7 +749,7 @@ fn transcribe_audio(
         .fold(f32::INFINITY, f32::min);
 
     let window_size = (if min_freq_diff.is_finite() && min_freq_diff > 0.0 {
-        (sample_rate / min_freq_diff).ceil() as usize
+        (2.0 * sample_rate / min_freq_diff).ceil() as usize
     } else {
         4096
     })
@@ -757,12 +757,12 @@ fn transcribe_audio(
     .max(1024)
     .min(16384);
 
-    let hop_size = (sample_rate / 48.0).round() as usize;
+    let hop_size = (sample_rate / 24.0).round() as usize;
 
     const HISTORY_LENGTH: usize = 5;
     const PEAK_HISTORY_LENGTH: usize = 3;
     const ONSET_FACTOR: f32 = 4.0;
-    //const MAX_NOTES: usize = 10;    
+    //const MAX_NOTES: usize = 10;
     //const ADAPTIVE_THRESHOLD_FACTOR: f32 = 1.0;
 
     let samples: Vec<f32> = reader
@@ -832,7 +832,7 @@ fn transcribe_audio(
 
         let mut peaks = Vec::new(); //freq index in fft, magnitude
 
-        let max_freq_index = magnitudes.len() / 2; //remember Nyquist's law
+        let max_freq_index = window_size / 2; //magnitudes.len() / 2; //remember Nyquist's law
         for i in 1..(max_freq_index - 1) {
             if magnitudes[i] > power_threshold
                 && magnitudes[i] > magnitudes[i - 1]
@@ -851,11 +851,6 @@ fn transcribe_audio(
                 }
             }
         }
-
-        if magnitude_history.len() >= HISTORY_LENGTH {
-            magnitude_history.pop_front();
-        }
-        magnitude_history.push_back(magnitudes);
 
         peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
@@ -937,10 +932,35 @@ fn transcribe_audio(
                                 //repeat to be more visible
                             }
                         }
+
+                        // //overlay intensity graph at peaks
+                        // for x in 0..IMG_WIDTH-1 {
+                        //     let log_i = (x as f32 / (IMG_WIDTH - 1) as f32) * log_num_bins;
+                        //     let i = 10.0f32.powf(log_i).round() as usize;
+
+                        //     if i < num_bins {
+                        //         let log_mag = if magnitudes[i] > 0.0 {
+                        //             magnitudes[i].log10()
+                        //         } else {
+                        //             0.0
+                        //         };
+
+                        //         let y = window_idx as i32 - (log_mag * 4.0) as i32;
+
+                        //         if y > 0 && y < MAX_IMG_HEIGHT as i32 {
+                        //             img.put_pixel(x, y as u32, Rgb([155, 155, 0]));
+                        //         }
+                        //     }
+                        // }
                     }
                 }
             }
         }
+
+        if magnitude_history.len() >= HISTORY_LENGTH {
+            magnitude_history.pop_front();
+        }
+        magnitude_history.push_back(magnitudes);
 
         if peak_history.len() >= PEAK_HISTORY_LENGTH {
             peak_history.pop_front();
@@ -950,7 +970,7 @@ fn transcribe_audio(
 
     if final_height > 0 {
         let cropped_img = image::imageops::crop_imm(&img, 0, 0, IMG_WIDTH, final_height).to_image();
-        cropped_img.save("dump.bmp")?;
+        cropped_img.save("transcribe_dump.bmp")?;
     }
 
     let song_title = source.file_stem().unwrap().to_str().unwrap().to_string();
