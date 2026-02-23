@@ -26,5 +26,6 @@ target
 *.ascii
 *.wav
 *.bmp
+*.txt
 
 

@@ -9,11 +9,9 @@
             "args": [
                 "transcribe",
                 "Jarabi.wav",
-                "Jarabi.msxml",
+                "Jarabi.txt",
                 "--tuning",
-                "Suarta",
-                "--format",
-                "msxml"
+                "Silaba"                
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",

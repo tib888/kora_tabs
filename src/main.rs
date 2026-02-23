@@ -318,7 +318,7 @@ fn draw_svg(
     Ok(())
 }
 
-fn draw_ascii(
+fn draw_ascii_old(
     song_title: &str,
     tuning: &KoraTuning,
     notes: &[Note],
@@ -395,6 +395,94 @@ fn draw_ascii(
                     }
                 }
             }
+        }
+
+        // Add the system to the output.
+        for line_chars in canvas {
+            output.push_str(&line_chars.iter().collect::<String>());
+            output.push('\n');
+        }
+        output.push('\n');
+        output.push('\n');
+    }
+
+    Ok(output)
+}
+
+fn draw_ascii(
+    song_title: &str,
+    tuning: &KoraTuning,
+    notes: &[Note],
+) -> Result<String, Box<dyn std::error::Error>> {
+    const MAX_WIDTH: usize = 120;
+    const SPEED: f64 = 4.0;
+
+    let mut output = format!("Title: {}\nTuning: {}\n\n", song_title, tuning.name);
+    if notes.is_empty() {
+        return Ok(output);
+    }
+
+    let lead = 0; //place for string info
+    let mut empty_canvas: Vec<Vec<char>> = vec![vec!['-'; MAX_WIDTH]; tuning.notes.len()];
+    empty_canvas.insert(11, vec![' '; MAX_WIDTH]);
+
+    let mut start_pos = notes[0].position;
+
+    //notes expected to be sorted by position
+    let mut notes: Vec<Note> = notes.to_vec();
+    notes.sort_by(|a, b| a.position.partial_cmp(&b.position).unwrap());
+    let max = notes.len();
+    let mut index = 0;
+
+    while index < max {
+        let mut canvas = empty_canvas.clone();
+
+        while index < max {
+            let note = &notes[index];
+
+            let col = ((note.position - start_pos) * SPEED) as usize + lead;
+
+            //detect when there is no space for more notes in the current line
+            if col >= MAX_WIDTH - 5 && index > 0 {
+                start_pos = notes[index - 1].position;
+                break;
+            }
+
+            // Fill canvas with notes
+            for row in 0..tuning.notes.len() {
+                let string_info = &tuning.notes[row];
+                if string_info.pitch == note.pitch {
+                    let (label, y) = if string_info.right {
+                        (
+                            if string_info.index <= 5 {
+                                format!(" +{}R ", (string_info.index + 0))
+                            } else {
+                                format!(" {}R ", (string_info.index as i8 - 11))
+                            },
+                            tuning.notes.len() - string_info.index as usize,
+                        )
+                    } else {
+                        (
+                            if string_info.index <= 5 {
+                                format!(" +{}L ", (string_info.index + 1))
+                            } else {
+                                format!(" {}L ", (string_info.index as i8 - 11))
+                            },
+                            10 - string_info.index as usize,
+                        )
+                    };
+
+                    canvas[11][col + 1] = '|';
+
+                    for (i, c) in label.chars().enumerate() {
+                        if col + i < MAX_WIDTH {
+                            canvas[y][col + i] = c;
+                        }
+                    }
+                }
+            }
+
+            index += 1;
         }
 
         // Add the system to the output.
@@ -1058,7 +1146,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     match format.as_str() {
-        "ascii" | "txt" => {
+        "ascii" => {
+            let ascii_output = draw_ascii_old(&song_title, &tuning, &notes)?;
+            fs::write(&output, ascii_output)?;
+        }
+        "txt" => {
             let ascii_output = draw_ascii(&song_title, &tuning, &notes)?;
             fs::write(&output, ascii_output)?;
         }
